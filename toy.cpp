@@ -69,6 +69,7 @@ static int gettok() {
 class ExprAST {
 public:
     virtual ~ExprAST() {}
+    virtual Value *CodeGen() = 0;
 };
 
 
@@ -76,14 +77,23 @@ class NumberExprAST : public ExprAST {
     double Val;
 public:
     NumberExprAST(double val) : Val(val) {}
+    virtual Value *CodeGen();
 };
+Value *NumberExprAST::CodeGen() {
+    return ConstantFP::get(getGlobalContext(), APFloat(Val));
+}
 
 
 class VariableExprAST : public ExprAST {
     std::string Name;
 public:
     VariableExprAST(const std::string &name) : Name(name) {}
+    virtual Value *CodeGen();
 };
+Value *VariableExprAST::CodeGen() {
+    Value *V = NamedValues[Name];
+    return V ? V : ErrorV("Unknown variable name");
+}
 
 
 class BinaryExprAST : public ExprAST {
@@ -92,7 +102,22 @@ class BinaryExprAST : public ExprAST {
 public:
     BinaryExprAST(char op, ExprAST *lhs, ExprAST *rhs)
         : Op(op), LHS(lhs), RHS(rhs) {}
+    virtual Value *CodeGen();
 };
+Value *BinaryExprAST::CodeGen() {
+    Value *L = LHS->CodeGen();
+    Value *R = RHS->CodeGen();
+    if (L == 0 || R == 0) return 0;
+    switch (Op) {
+        case '+': return Builder.CreateFAdd(L, R, "addtmp");
+        case '-': return Builder.CreateFSub(L, R, "subtmp");
+        case '*': return Builder.CreateFMul(L, R, "multmp");
+        case '<':
+            L = Builder.CreateFCmpULT(L, R, "cmptmp");
+            return Builder.CreateUIToFP(L, Type::getDoubleTy(getGlobalContext()), "booltmp");
+        default: return ErrorV("Unknown binary operator");
+    }
+}
 
 
 class CallExprAST : public ExprAST {
@@ -101,7 +126,26 @@ class CallExprAST : public ExprAST {
 public:
     CallExprAST(const std::string &callee, std::vector<ExprAST*> &args)
         : Callee(callee), Args(args) {}
+    virtual Value *CodeGen();
 };
+Value *CallExprAST::CodeGen() {
+    Function *CalleeF = TheModule->getFunction(Callee);
+    if (CalleeF == 0) {
+        return ErrorV("Unknown function referenced");
+    }
+
+    if (CalleeF->arg_size() != Args.size())
+        return ErrorV("Incorrect number of arguments");
+
+    std::vector<Value*> ArgsV;
+    for (unsigned i=0, e = Args.size(); i != e; ++i) {
+        ArgsV.push_back(Args[i]->CodeGen());
+        if (ArgsV.back() == 0) return 0;
+    }
+
+    return Builder.CreateCall(CalleeF, ArgsV, "calltmp");
+}
+
 
 
 class PrototypeAST {
@@ -110,7 +154,40 @@ class PrototypeAST {
 public:
     PrototypeAST(const std::string &name, const std::vector<std::string> &args)
         : Name(name), Args(args) {}
+    virtual Value *CodeGen();
 };
+Function *PrototypeAST::CodeGen() {
+    std::vector<Type*> Doubles(Args.size(), Type::getDoubleTy(getGlobalContext()));
+    FunctionType *FT = FunctionType.get(Type::getDoubleTy(getGlobalContext())), Doubles, false);
+    Function *F = Function::Create(FT, Function::ExternalLinkage, Name, TheModule);
+    if (F->getName() != Name) {
+        // If this function was previously defined, it will have been renamed as soon as it
+        // as created.  So we get rid of the one we just created, and replace it with the old one.
+        // This allows multiple prototype definitions.
+        F->eraseFromParent();
+        F = TheModule->getFunction(Name);
+
+        if (!F->empty()) {
+            // ...unless it was actually defined with a body previously.
+            ErrorF("redefinition of function");
+            return 0;
+        }
+
+        if (F->arg_size() != Args.size()) {
+            // Or it had a different number of args.
+            ErrorF("redefinition of function with a different number of args");
+            return 0;
+        }
+    }
+    unsigned Idx = 0;
+    for (Function::arg_iterator AI = F->arg_begin(); Idx != Args.size(); ++AI, ++Idx)
+    {
+        AI->setName(Args[Idx]);
+        NamedValues[Args[Idx]] = AI;
+    }
+
+    return F;
+}
 
 
 class FunctionAST {
@@ -119,6 +196,7 @@ class FunctionAST {
 public:
     FunctionAST(PrototypeAST *proto, ExprAST *body)
         : Proto(proto), Body(body) {}
+    virtual Value *CodeGen();
 };
 
 
@@ -131,6 +209,12 @@ static int getNextToken() {
 ExprAST *Error(const char *Str) { fprintf(stderr, "Error: %s\n", Str); return 0; }
 PrototypeAST *ErrorP(const char *Str) { Error(Str); return 0; }
 FunctionAST *ErrorF(const char *Str) { Error(Str); return 0; }
+Value *ErrorV(const char *Str) { Error(Str); return 0; }
+
+
+static Module *TheModule;
+static IRBuilder<> Builder(getGlobalContext());
+static std::map<std::string, Value*> NamedValues;
 
 
 static ExprAST *ParseExpression();
