@@ -1,4 +1,4 @@
-CC=gcc
+CC=g++
 CFLAGS=-g -O3
 LLVM_FLAGS=$(shell llvm-config --cxxflags --ldflags --libs core)
 
