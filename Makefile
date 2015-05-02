@@ -1,6 +1,6 @@
 CC=g++
 CFLAGS=-g -O3
-LLVM_FLAGS=$(shell llvm-config --cxxflags --ldflags --libs core)
+LLVM_FLAGS=$(shell llvm-config --cxxflags --libs core) $(shell llvm-config --ldflags)
 
 all: toy
 
