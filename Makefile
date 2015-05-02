@@ -1,11 +1,11 @@
 CC=gcc
 CFLAGS=-g -O3
-LLVM_FLAGS=`llvm-config --cxxflags --ldflags --libs core`
+LLVM_FLAGS=$(shell llvm-config --cxxflags --ldflags --libs core)
 
 all: toy
 
 toy: toy.cpp
-	$(CC) $(CFLAGS) toy.cpp $(LLVM_FLAGSi) -o toy
+	$(CC) $(CFLAGS) toy.cpp $(LLVM_FLAGS) -o toy
 
 clean:
 	rm -f toy
