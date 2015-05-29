@@ -436,8 +436,11 @@ static void HandleExtern() {
 
 static void HandleTopLevelExpression() {
   // Evaluate a top-level expression into an anonymous function.
-  if (ParseTopLevelExpr()) {
-    fprintf(stderr, "Parsed a top-level expr\n");
+  if (FunctionAST *F = ParseTopLevelExpr()) {
+    if (Function *LF = F->CodeGen()) {
+        fprintf(stderr, "Parsed a top-level expr\n");
+        LF->dump();
+    }
   } else {
     // Skip token for error recovery.
     getNextToken();
@@ -470,13 +473,13 @@ int main() {
     fprintf(stderr, "ready> ");
     getNextToken();
 
+    LLVMContext &Context = getGlobalContext();
+    TheModule = new Module("my cool jit", Context);
+
     MainLoop();
+
+    TheModule->dump();
 
     return 0;
 }
-
-
-
-
-
 
