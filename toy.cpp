@@ -1,8 +1,15 @@
+#include "llvm/Analysis/Passes.h"
 #include "llvm/Analysis/Verifier.h"
+#include "llvm/ExecutionEngine/ExecutionEngine.h"
+#include "llvm/ExecutionEngine/JIT.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/PassManager.h"
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/Transforms/Scalar.h"
 #include <cctype>
 #include <cstdio>
 #include <map>
@@ -156,6 +163,7 @@ Value *ErrorV(const char *Str) { Error(Str); return 0; }
 static Module *TheModule;
 static IRBuilder<> Builder(getGlobalContext());
 static std::map<std::string, Value*> NamedValues;
+static FunctionPassManager *TheFPM;
 
 
 static ExprAST *ParseExpression();
@@ -407,6 +415,7 @@ Function *FunctionAST::CodeGen() {
     if (Value *RetVal = Body->CodeGen()) {
         Builder.CreateRet(RetVal);
         verifyFunction(*TheFunction);
+        TheFPM->run(*TheFunction);
         return TheFunction;
     }
 
@@ -415,31 +424,42 @@ Function *FunctionAST::CodeGen() {
 }
 
 
+static ExecutionEngine *TheExecutionEngine;
 
 static void HandleDefinition() {
-  if (ParseDefinition()) {
-    fprintf(stderr, "Parsed a function definition.\n");
-  } else {
-    // Skip token for error recovery.
-    getNextToken();
-  }
+    if (FunctionAST *F = ParseDefinition()) {
+        if (Function *LF = F->CodeGen()) {
+            fprintf(stderr, "Parsed a function definition.\n");
+            LF->dump();
+        }
+    } else {
+      // Skip token for error recovery.
+      getNextToken();
+    }
 }
 
 static void HandleExtern() {
-  if (ParseExtern()) {
-    fprintf(stderr, "Parsed an extern\n");
-  } else {
-    // Skip token for error recovery.
-    getNextToken();
-  }
+    if (PrototypeAST *P = ParseExtern()) {
+        if (Function *F = P->CodeGen()) {
+            fprintf(stderr, "Parsed an extern\n");
+            F->dump();
+        }
+    } else {
+        // Skip token for error recovery.
+        getNextToken();
+    }
 }
 
 static void HandleTopLevelExpression() {
   // Evaluate a top-level expression into an anonymous function.
   if (FunctionAST *F = ParseTopLevelExpr()) {
     if (Function *LF = F->CodeGen()) {
-        fprintf(stderr, "Parsed a top-level expr\n");
         LF->dump();
+
+        void *FPtr = TheExecutionEngine->getPointerToFunction(LF);
+
+        double (*FP)() = (double (*)())(intptr_t)FPtr;
+        fprintf(stderr, "Evaluated to %f\n", FP());
     }
   } else {
     // Skip token for error recovery.
@@ -465,6 +485,9 @@ static void MainLoop() {
 
 
 int main() {
+    InitializeNativeTarget();
+    LLVMContext &Context = getGlobalContext();
+
     BinopPrecedence['<'] = 10;
     BinopPrecedence['+'] = 20;
     BinopPrecedence['-'] = 20;
@@ -473,10 +496,29 @@ int main() {
     fprintf(stderr, "ready> ");
     getNextToken();
 
-    LLVMContext &Context = getGlobalContext();
     TheModule = new Module("my cool jit", Context);
 
+    std::string ErrStr;
+    TheExecutionEngine = EngineBuilder(TheModule).setErrorStr(&ErrStr).create();
+    if (!TheExecutionEngine) {
+        fprintf(stderr, "Could not create ExcutionEngine: %s\n", ErrStr.c_str());
+        exit(1);
+    }
+
+    FunctionPassManager OurFPM(TheModule);
+    OurFPM.add(new DataLayout(*TheExecutionEngine->getDataLayout()));
+    OurFPM.add(createBasicAliasAnalysisPass());
+    OurFPM.add(createInstructionCombiningPass());
+    OurFPM.add(createReassociatePass());
+    OurFPM.add(createGVNPass());
+    OurFPM.add(createCFGSimplificationPass());
+    OurFPM.doInitialization();
+
+    TheFPM = &OurFPM;
+
     MainLoop();
+
+    TheFPM = 0;
 
     TheModule->dump();
 
