@@ -28,7 +28,12 @@ enum Token {
 
     // primary
     tok_identifier = -4,
-    tok_number = -5
+    tok_number = -5,
+
+    // control
+    tok_if = -6,
+    tok_then = -7,
+    tok_else = -8,
 };
 
 static std::string IdentifierStr;
@@ -47,6 +52,9 @@ static int gettok() {
 
         if (IdentifierStr == "def") return tok_def;
         if (IdentifierStr == "extern") return tok_extern;
+        if (IdentifierStr == "if") return tok_if;
+        if (IdentifierStr == "then") return tok_then;
+        if (IdentifierStr == "else") return tok_else;
 
         return tok_identifier;
     }
@@ -125,6 +133,15 @@ public:
 };
 
 
+class IfExprAST : public ExprAST {
+    ExprAST *Cond, *Then, *Else;
+public:
+    IfExprAST(ExprAST *cond, ExprAST *then, ExprAST *_else)
+        : Cond(cond), Then(then), Else(_else) {}
+    virtual Value *CodeGen();
+};
+
+
 
 class PrototypeAST {
     std::string Name;
@@ -189,6 +206,32 @@ static ExprAST *ParseParenExpr() {
 }
 
 
+static ExprAST *ParseIfExpr() {
+    getNextToken();
+    ExprAST *Cond = ParseExpression();
+    if (!Cond) return 0;
+
+    if (CurTok != tok_then)
+        return Error("expected then");
+
+    getNextToken();
+    
+    ExprAST *Then = ParseExpression();
+    if (Then == 0) return 0;
+
+    if (CurTok != tok_else)
+        return Error("expected else");
+    getNextToken();
+
+    ExprAST *Else = ParseExpression();
+    if (!Else) return 0;
+
+    return new IfExprAST(Cond, Then, Else);
+}
+
+
+
+
 static ExprAST *ParseIdentifierExpr() {
     std::string IdName = IdentifierStr;
 
@@ -225,6 +268,7 @@ static ExprAST *ParsePrimary() {
         case tok_identifier: return ParseIdentifierExpr();
         case tok_number: return ParseNumberExpr();
         case '(': return ParseParenExpr();
+        case tok_if: return ParseIfExpr();
     }
 }
 
@@ -365,6 +409,45 @@ Value *CallExprAST::CodeGen() {
     }
 
     return Builder.CreateCall(CalleeF, ArgsV, "calltmp");
+}
+
+
+Value *IfExprAST::CodeGen() {
+    Value *CondV = Cond->CodeGen();
+    if (CondV == 0) return 0;
+
+    CondV = Builder.CreateFCmpONE(CondV, ConstantFP::get(getGlobalContext(), APFloat(0.0)), "ifcond");
+
+    Function *TheFunction = Builder.GetInsertBlock()->getParent();
+
+    BasicBlock *ThenBB = BasicBlock::Create(getGlobalContext(), "then", TheFunction);
+    BasicBlock *ElseBB = BasicBlock::Create(getGlobalContext(), "else");
+    BasicBlock *MergeBB = BasicBlock::Create(getGlobalContext(), "ifcont");
+
+    Builder.CreateCondBr(CondV, ThenBB, ElseBB);
+
+    Builder.SetInsertPoint(ThenBB);
+    Value *ThenV = Then->CodeGen();
+    if (ThenV == 0) return 0;
+
+    Builder.CreateBr(MergeBB);
+    ThenBB = Builder.GetInsertBlock();
+
+    TheFunction->getBasicBlockList().push_back(ElseBB);
+    Builder.SetInsertPoint(ElseBB);
+    Value *ElseV = Else->CodeGen();
+    if (ElseV == 0) return 0;
+
+    Builder.CreateBr(MergeBB);
+    ElseBB = Builder.GetInsertBlock();
+
+    TheFunction->getBasicBlockList().push_back(MergeBB);
+    Builder.SetInsertPoint(MergeBB);
+    PHINode *PN = Builder.CreatePHI(Type::getDoubleTy(getGlobalContext()), 2, "iftmp");
+
+    PN->addIncoming(ThenV, ThenBB);
+    PN->addIncoming(ElseV, ElseBB);
+    return PN;
 }
 
 
