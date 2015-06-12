@@ -34,6 +34,8 @@ enum Token {
     tok_if = -6,
     tok_then = -7,
     tok_else = -8,
+    tok_for = -9,
+    tok_in = -10,
 };
 
 static std::string IdentifierStr;
@@ -55,6 +57,8 @@ static int gettok() {
         if (IdentifierStr == "if") return tok_if;
         if (IdentifierStr == "then") return tok_then;
         if (IdentifierStr == "else") return tok_else;
+        if (IdentifierStr == "for") return tok_for;
+        if (IdentifierStr == "in") return tok_in;
 
         return tok_identifier;
     }
@@ -142,6 +146,16 @@ public:
 };
 
 
+class ForExprAST : public ExprAST {
+    std::string VarName;
+    ExprAST *Start, *End, *Step, *Body;
+public:
+    ForExprAST(const std::string &varname, ExprAST *start, ExprAST *end, ExprAST *step, ExprAST *body)
+        : VarName(varname), Start(start), End(end), Step(step), Body(body) {}
+    virtual Value *CodeGen();
+};
+
+
 
 class PrototypeAST {
     std::string Name;
@@ -215,7 +229,7 @@ static ExprAST *ParseIfExpr() {
         return Error("expected then");
 
     getNextToken();
-    
+
     ExprAST *Then = ParseExpression();
     if (Then == 0) return 0;
 
@@ -229,6 +243,50 @@ static ExprAST *ParseIfExpr() {
     return new IfExprAST(Cond, Then, Else);
 }
 
+
+
+static ExprAST *ParseForExpr() {
+    getNextToken();
+
+    if (CurTok != tok_identifier)
+        return Error("Expected identifier after for");
+
+    std::string IdName = IdentifierStr;
+    getNextToken();
+
+    if (CurTok != '=')
+        return Error("Expected '=' after identifier in for");
+    getNextToken();
+
+    ExprAST *Start = ParseExpression();
+    if (Start == 0)
+        return 0;
+    if (CurTok != ',')
+        return Error("Expected ',' after for start value");
+    getNextToken();
+
+    ExprAST *End = ParseExpression();
+    if (End == 0)
+        return 0;
+
+    ExprAST *Step = 0;
+    if (CurTok == ',') {
+        getNextToken();
+        Step = ParseExpression();
+        if (Step == 0)
+            return 0;
+    }
+
+    if (CurTok != tok_in)
+        return Error("Expected 'in' after 'for'");
+    getNextToken();
+
+    ExprAST *Body = ParseExpression();
+    if (Body == 0)
+        return 0;
+
+    return new ForExprAST(IdName, Start, End, Step, Body);
+}
 
 
 
@@ -269,6 +327,7 @@ static ExprAST *ParsePrimary() {
         case tok_number: return ParseNumberExpr();
         case '(': return ParseParenExpr();
         case tok_if: return ParseIfExpr();
+        case tok_for: return ParseForExpr();
     }
 }
 
@@ -451,6 +510,63 @@ Value *IfExprAST::CodeGen() {
 }
 
 
+Value *ForExprAST::CodeGen() {
+    Value *StartVal = Start->CodeGen();
+    if (StartVal == 0)
+        return 0;
+
+    Function *TheFunction = Builder.GetInsertBlock()->getParent();
+    BasicBlock *PreheaderBB = Builder.GetInsertBlock();
+    BasicBlock *LoopBB = BasicBlock::Create(getGlobalContext(), "loop", TheFunction);
+
+    Builder.CreateBr(LoopBB);
+
+    Builder.SetInsertPoint(LoopBB);
+
+    PHINode *Variable = Builder.CreatePHI(Type::getDoubleTy(getGlobalContext()), 2, VarName.c_str());
+    Variable->addIncoming(StartVal, PreheaderBB);
+
+    Value *OldVal = NamedValues[VarName];
+    NamedValues[VarName] = Variable;
+
+    if (Body->CodeGen() == 0)
+        return 0;
+
+    Value *StepVal;
+    if (Step) {
+        StepVal = Step->CodeGen();
+        if (StepVal == 0)
+            return 0;
+    } else {
+        StepVal = ConstantFP::get(getGlobalContext(), APFloat(1.0));
+    }
+
+    Value *NextVar = Builder.CreateFAdd(Variable, StepVal, "nextvar");
+
+    Value *EndCond = End->CodeGen();
+    if (EndCond == 0)
+        return 0;
+
+    EndCond = Builder.CreateFCmpONE(EndCond, ConstantFP::get(getGlobalContext(), APFloat(0.0)), "loopcond");
+
+    BasicBlock *LoopEndBB = Builder.GetInsertBlock();
+    BasicBlock *AfterBB = BasicBlock::Create(getGlobalContext(), "afterloop", TheFunction);
+
+    Builder.CreateCondBr(EndCond, LoopBB, AfterBB);
+
+    Builder.SetInsertPoint(AfterBB);
+
+    Variable->addIncoming(NextVar, LoopEndBB);
+
+    if (OldVal)
+        NamedValues[VarName] = OldVal;
+    else
+        NamedValues.erase(VarName);
+
+    return Constant::getNullValue(Type::getDoubleTy(getGlobalContext()));
+}
+
+
 Function *PrototypeAST::CodeGen() {
     std::vector<Type*> Doubles(Args.size(), Type::getDoubleTy(getGlobalContext()));
     FunctionType *FT = FunctionType::get(Type::getDoubleTy(getGlobalContext()), Doubles, false);
@@ -565,6 +681,13 @@ static void MainLoop() {
     }
 }
 
+
+
+extern "C"
+double putchard(double X) {
+  putchar((char)X);
+  return 0;
+}
 
 
 int main() {
